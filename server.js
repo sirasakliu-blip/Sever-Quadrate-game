@@ -22,6 +22,16 @@ function generateRoomId() {
 function getSanitizedRoomList() {
   const list = [];
   for (const [id, r] of rooms.entries()) {
+    // Clean up dead rooms if host disconnected or no longer belongs to this room
+    if (!r.hostWs || r.hostWs.readyState !== WebSocket.OPEN) {
+      rooms.delete(id);
+      continue;
+    }
+    const hostClient = clients.get(r.hostWs);
+    if (!hostClient || hostClient.roomId !== id) {
+      rooms.delete(id);
+      continue;
+    }
     list.push({
       id: r.id,
       name: r.name,
@@ -31,7 +41,7 @@ function getSanitizedRoomList() {
       guestName: r.guestName,
       status: r.status,
       subMode: r.subMode || 'Modern',
-      playerCount: (r.hostWs ? 1 : 0) + (r.guestWs ? 1 : 0)
+      playerCount: (r.hostWs ? 1 : 0) + (r.guestWs && r.guestWs.readyState === WebSocket.OPEN ? 1 : 0)
     });
   }
   return list;
@@ -131,7 +141,28 @@ function handleClientMessage(ws, data) {
 
     case 'SET_PLAYER_NAME': {
       if (data.name && typeof data.name === 'string') {
-        client.name = data.name.trim().substring(0, 20);
+        const cleanName = data.name.trim().substring(0, 20);
+        if (cleanName) {
+          client.name = cleanName;
+          if (client.roomId) {
+            const room = rooms.get(client.roomId);
+            if (room) {
+              if (room.hostId === client.id) {
+                room.hostName = cleanName;
+              } else if (room.guestId === client.id) {
+                room.guestName = cleanName;
+              }
+              const updateMsg = JSON.stringify({
+                type: 'ROOM_PLAYERS_UPDATED',
+                hostName: room.hostName,
+                guestName: room.guestName
+              });
+              if (room.hostWs && room.hostWs.readyState === WebSocket.OPEN) room.hostWs.send(updateMsg);
+              if (room.guestWs && room.guestWs.readyState === WebSocket.OPEN) room.guestWs.send(updateMsg);
+              broadcastRoomList();
+            }
+          }
+        }
       }
       break;
     }
@@ -145,8 +176,17 @@ function handleClientMessage(ws, data) {
     }
 
     case 'CREATE_ROOM': {
+      // If client was already hosting or inside a room, leave/clean it up first
+      if (client.roomId) {
+        handleClientLeaveRoom(ws);
+      }
+
       const roomId = generateRoomId();
-      const roomName = (data.name && data.name.trim()) ? data.name.trim().substring(0, 25) : ('ห้องประลอง #' + roomId.split('-')[1]);
+      const hostName = (data.hostName && data.hostName.trim()) 
+        ? data.hostName.trim().substring(0, 20) 
+        : (client.name || 'Player 1');
+      client.name = hostName;
+      const roomName = (data.name && data.name.trim()) ? data.name.trim().substring(0, 25) : ('ห้องของ ' + hostName);
       const password = (data.password && data.password.trim()) ? data.password.trim().substring(0, 20) : '';
       const rounds = (data.rounds === 1 || data.rounds === 3) ? data.rounds : 2; // Best of 1, 3, 5
       const subMode = ['Modern', 'Classic', 'Sprint', 'Ultra', 'BlockBlast'].includes(data.subMode) ? data.subMode : 'Modern';
@@ -198,8 +238,12 @@ function handleClientMessage(ws, data) {
         ws.send(JSON.stringify({ type: 'JOIN_ERROR', error: 'ไม่พบห้องที่ระบุ หรือห้องถูกปิดแล้ว' }));
         return;
       }
+      if (room.status === 'PLAYING') {
+        ws.send(JSON.stringify({ type: 'JOIN_ERROR', error: 'ห้องนี้กำลังแข่งขันอยู่ (เริ่มเล่นไปแล้ว)' }));
+        return;
+      }
       if (room.guestWs && room.guestWs.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'JOIN_ERROR', error: 'ห้องนี้มีผู้เล่นเต็มแล้ว' }));
+        ws.send(JSON.stringify({ type: 'JOIN_ERROR', error: 'ห้องนี้มีผู้เล่นเต็มแล้ว (2/2)' }));
         return;
       }
       if (room.hasPassword) {
@@ -209,8 +253,13 @@ function handleClientMessage(ws, data) {
         }
       }
 
+      const guestName = (data.guestName && data.guestName.trim()) 
+        ? data.guestName.trim().substring(0, 20) 
+        : (client.name || 'Player 2');
+      client.name = guestName;
+
       room.guestId = client.id;
-      room.guestName = client.name;
+      room.guestName = guestName;
       room.guestWs = ws;
       client.roomId = room.id;
 
@@ -361,6 +410,66 @@ function handleClientMessage(ws, data) {
       break;
     }
 
+    case 'REQUEST_REMATCH': {
+      const room = rooms.get(client.roomId);
+      if (!room) return;
+      if (!room.rematchVotes) room.rematchVotes = new Set();
+      room.rematchVotes.add(client.id);
+
+      const hasGuest = (room.guestWs && room.guestWs.readyState === WebSocket.OPEN);
+      if (!hasGuest || room.rematchVotes.size >= 2 || client.id === room.hostId) {
+        // Reset room clean to WAITING status so players can battle again
+        room.status = 'WAITING';
+        room.p1Wins = 0;
+        room.p2Wins = 0;
+        room.rematchVotes.clear();
+        room.currentSeed = Math.floor(Math.random() * 1000000);
+
+        if (room.hostWs && room.hostWs.readyState === WebSocket.OPEN) {
+          room.hostWs.send(JSON.stringify({
+            type: 'REMATCH_ACCEPTED',
+            room: {
+              id: room.id,
+              name: room.name,
+              hasPassword: room.hasPassword,
+              rounds: room.rounds,
+              subMode: room.subMode,
+              hostName: room.hostName,
+              guestName: hasGuest ? room.guestName : null,
+              isHost: true
+            }
+          }));
+        }
+
+        if (room.guestWs && room.guestWs.readyState === WebSocket.OPEN) {
+          room.guestWs.send(JSON.stringify({
+            type: 'REMATCH_ACCEPTED',
+            room: {
+              id: room.id,
+              name: room.name,
+              hasPassword: room.hasPassword,
+              rounds: room.rounds,
+              subMode: room.subMode,
+              hostName: room.hostName,
+              guestName: room.guestName,
+              isHost: false
+            }
+          }));
+        }
+
+        broadcastRoomList();
+      } else {
+        // Inform host that guest wants a rematch
+        if (room.hostWs && room.hostWs.readyState === WebSocket.OPEN) {
+          room.hostWs.send(JSON.stringify({
+            type: 'OPPONENT_WANTS_REMATCH',
+            requesterName: client.name
+          }));
+        }
+      }
+      break;
+    }
+
     case 'LEAVE_ROOM': {
       handleClientLeaveRoom(ws);
       break;
@@ -389,11 +498,14 @@ function handleClientLeaveRoom(ws) {
       }
       rooms.delete(room.id);
     } else {
-      // Guest left -> reset guest slot and inform host
+      // Guest left -> reset guest slot and reset room status to WAITING
       room.guestId = null;
       room.guestName = null;
       room.guestWs = null;
       room.status = 'WAITING';
+      room.p1Wins = 0;
+      room.p2Wins = 0;
+      if (room.rematchVotes) room.rematchVotes.clear();
       if (room.hostWs && room.hostWs.readyState === WebSocket.OPEN) {
         room.hostWs.send(JSON.stringify({
           type: 'GUEST_LEFT',
