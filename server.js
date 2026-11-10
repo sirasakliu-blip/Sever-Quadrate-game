@@ -182,14 +182,15 @@ function handleClientMessage(ws, data) {
       }
 
       const roomId = generateRoomId();
-      const hostName = (data.hostName && data.hostName.trim()) 
-        ? data.hostName.trim().substring(0, 20) 
+      const roomData = data.room || data;
+      const hostName = (roomData.hostName && roomData.hostName.trim()) 
+        ? roomData.hostName.trim().substring(0, 20) 
         : (client.name || 'Player 1');
       client.name = hostName;
-      const roomName = (data.name && data.name.trim()) ? data.name.trim().substring(0, 25) : ('ห้องของ ' + hostName);
-      const password = (data.password && data.password.trim()) ? data.password.trim().substring(0, 20) : '';
-      const rounds = (data.rounds === 1 || data.rounds === 3) ? data.rounds : 2; // Best of 1, 3, 5
-      const subMode = ['Modern', 'Classic', 'Sprint', 'Ultra', 'BlockBlast'].includes(data.subMode) ? data.subMode : 'Modern';
+      const roomName = (roomData.name && roomData.name.trim()) ? roomData.name.trim().substring(0, 25) : ('ห้องของ ' + hostName);
+      const password = (roomData.password && roomData.password.trim()) ? roomData.password.trim().substring(0, 20) : '';
+      const rounds = (roomData.rounds === 1 || roomData.rounds === 3) ? roomData.rounds : 2; // Best of 1, 3, 5
+      const subMode = ['Modern', 'Classic', 'Sprint', 'Ultra', 'BlockBlast'].includes(roomData.subMode) ? roomData.subMode : 'Modern';
 
       const room = {
         id: roomId,
@@ -324,6 +325,7 @@ function handleClientMessage(ws, data) {
     case 'START_NEXT_ROUND': {
       const room = rooms.get(client.roomId);
       if (!room || room.hostId !== client.id) return;
+      room.status = 'PLAYING';
       room.currentSeed = Math.floor(Math.random() * 1000000);
       const nextRoundMsg = JSON.stringify({
         type: 'ROUND_STARTED',
@@ -521,18 +523,19 @@ function handleClientLeaveRoom(ws) {
   if (room) {
     const isHost = (client.id === room.hostId);
     if (isHost) {
-      // Host left -> close room and inform guest
+      // Host ออกจากห้อง -> ปิดห้องและแจ้งเตือนพา Guest กลับสู่ล็อบบี้ทันที
       if (room.guestWs && room.guestWs.readyState === WebSocket.OPEN) {
         room.guestWs.send(JSON.stringify({
           type: 'ROOM_CLOSED',
-          message: 'เจ้าของห้องออกจากห้องแล้ว'
+          message: 'เจ้าของห้องออกจากห้องแล้ว ระบบจะพากลับสู่ล็อบบี้'
         }));
         const guestClient = clients.get(room.guestWs);
         if (guestClient) guestClient.roomId = null;
       }
       rooms.delete(room.id);
     } else {
-      // Guest left -> reset guest slot and reset room status to WAITING
+      // Guest ออกจากห้อง
+      const hadGuestName = room.guestName || 'ผู้เล่น';
       room.guestId = null;
       room.guestName = null;
       room.guestWs = null;
@@ -540,10 +543,12 @@ function handleClientLeaveRoom(ws) {
       room.p1Wins = 0;
       room.p2Wins = 0;
       if (room.rematchVotes) room.rematchVotes.clear();
+
       if (room.hostWs && room.hostWs.readyState === WebSocket.OPEN) {
         room.hostWs.send(JSON.stringify({
           type: 'GUEST_LEFT',
-          message: 'ผู้เล่นออกจากห้องแล้ว'
+          guestName: hadGuestName,
+          message: `${hadGuestName} ออกจากการแข่งขันแล้ว ห้องถูกรีเซ็ตกลับสู่ล็อบบี้`
         }));
       }
     }
