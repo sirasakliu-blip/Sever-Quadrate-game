@@ -417,55 +417,89 @@ function handleClientMessage(ws, data) {
       room.rematchVotes.add(client.id);
 
       const hasGuest = (room.guestWs && room.guestWs.readyState === WebSocket.OPEN);
-      if (!hasGuest || room.rematchVotes.size >= 2 || client.id === room.hostId) {
-        // Reset room clean to WAITING status so players can battle again
-        room.status = 'WAITING';
+      const isBothVoted = (!hasGuest || room.rematchVotes.size >= 2);
+
+      if (isBothVoted) {
+        // Both accepted rematch! Start new match right away
+        room.status = 'PLAYING';
         room.p1Wins = 0;
         room.p2Wins = 0;
         room.rematchVotes.clear();
         room.currentSeed = Math.floor(Math.random() * 1000000);
 
+        const hostPayload = {
+          type: 'REMATCH_ACCEPTED',
+          room: {
+            id: room.id,
+            name: room.name,
+            hasPassword: room.hasPassword,
+            rounds: room.rounds,
+            targetWins: room.targetWins,
+            subMode: room.subMode,
+            hostName: room.hostName,
+            guestName: room.guestName,
+            isHost: true
+          },
+          targetWins: room.targetWins,
+          opponentName: room.guestName || 'Player 2',
+          subMode: room.subMode,
+          seed: room.currentSeed
+        };
+
+        const guestPayload = {
+          type: 'REMATCH_ACCEPTED',
+          room: {
+            id: room.id,
+            name: room.name,
+            hasPassword: room.hasPassword,
+            rounds: room.rounds,
+            targetWins: room.targetWins,
+            subMode: room.subMode,
+            hostName: room.hostName,
+            guestName: room.guestName,
+            isHost: false
+          },
+          targetWins: room.targetWins,
+          opponentName: room.hostName || 'Host',
+          subMode: room.subMode,
+          seed: room.currentSeed
+        };
+
         if (room.hostWs && room.hostWs.readyState === WebSocket.OPEN) {
-          room.hostWs.send(JSON.stringify({
-            type: 'REMATCH_ACCEPTED',
-            room: {
-              id: room.id,
-              name: room.name,
-              hasPassword: room.hasPassword,
-              rounds: room.rounds,
-              subMode: room.subMode,
-              hostName: room.hostName,
-              guestName: hasGuest ? room.guestName : null,
-              isHost: true
-            }
-          }));
+          room.hostWs.send(JSON.stringify(hostPayload));
         }
 
         if (room.guestWs && room.guestWs.readyState === WebSocket.OPEN) {
-          room.guestWs.send(JSON.stringify({
-            type: 'REMATCH_ACCEPTED',
-            room: {
-              id: room.id,
-              name: room.name,
-              hasPassword: room.hasPassword,
-              rounds: room.rounds,
-              subMode: room.subMode,
-              hostName: room.hostName,
-              guestName: room.guestName,
-              isHost: false
-            }
-          }));
+          room.guestWs.send(JSON.stringify(guestPayload));
         }
 
         broadcastRoomList();
       } else {
-        // Inform host that guest wants a rematch
-        if (room.hostWs && room.hostWs.readyState === WebSocket.OPEN) {
-          room.hostWs.send(JSON.stringify({
+        // One player requested rematch -> Notify the other player
+        const isHost = (client.id === room.hostId);
+        const otherWs = isHost ? room.guestWs : room.hostWs;
+        if (otherWs && otherWs.readyState === WebSocket.OPEN) {
+          otherWs.send(JSON.stringify({
             type: 'OPPONENT_WANTS_REMATCH',
-            requesterName: client.name
+            requesterName: client.name || (isHost ? room.hostName : room.guestName) || 'คู่ต่อสู้'
           }));
         }
+      }
+      break;
+    }
+
+    case 'REJECT_REMATCH': {
+      const room = rooms.get(client.roomId);
+      if (!room) return;
+      if (room.rematchVotes) room.rematchVotes.clear();
+      const isHost = (client.id === room.hostId);
+      const otherWs = isHost ? room.guestWs : room.hostWs;
+      if (otherWs && otherWs.readyState === WebSocket.OPEN) {
+        otherWs.send(JSON.stringify({
+          type: 'REMATCH_REJECTED',
+          rejecterName: client.name || 'คู่ต่อสู้',
+          message: `${client.name || 'คู่ต่อสู้'} ปฏิเสธคำท้าแข่งขันอีกรอบ`
+        }));
       }
       break;
     }
