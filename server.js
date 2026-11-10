@@ -41,6 +41,8 @@ function getSanitizedRoomList() {
       guestName: r.guestName,
       status: r.status,
       subMode: r.subMode || 'Modern',
+      splitRole: !!r.splitRole,
+      dualDrop: !!r.dualDrop,
       playerCount: (r.hostWs ? 1 : 0) + (r.guestWs && r.guestWs.readyState === WebSocket.OPEN ? 1 : 0)
     });
   }
@@ -199,6 +201,8 @@ function handleClientMessage(ws, data) {
         hasPassword: password.length > 0,
         rounds: rounds,
         subMode: subMode,
+        splitRole: !!roomData.splitRole,
+        dualDrop: !!roomData.dualDrop,
         targetWins: rounds, // 1 for BO1, 2 for BO3, 3 for BO5
         hostId: client.id,
         hostName: client.name,
@@ -223,6 +227,8 @@ function handleClientMessage(ws, data) {
           hasPassword: room.hasPassword,
           rounds: room.rounds,
           subMode: room.subMode,
+          splitRole: room.splitRole,
+          dualDrop: room.dualDrop,
           hostName: room.hostName,
           guestName: null,
           isHost: true
@@ -273,6 +279,8 @@ function handleClientMessage(ws, data) {
           hasPassword: room.hasPassword,
           rounds: room.rounds,
           subMode: room.subMode,
+          splitRole: room.splitRole,
+          dualDrop: room.dualDrop,
           hostName: room.hostName,
           guestName: room.guestName,
           isHost: false
@@ -311,6 +319,8 @@ function handleClientMessage(ws, data) {
         rounds: room.rounds,
         targetWins: room.targetWins,
         subMode: room.subMode,
+        splitRole: !!room.splitRole,
+        dualDrop: !!room.dualDrop,
         seed: room.currentSeed,
         hostName: room.hostName,
         guestName: room.guestName
@@ -378,6 +388,24 @@ function handleClientMessage(ws, data) {
       const room = rooms.get(client.roomId);
       if (!room || room.status !== 'PLAYING') return;
 
+      if (room.splitRole || room.dualDrop) {
+        room.status = 'MATCH_OVER';
+        const coopGameOverMsg = JSON.stringify({
+          type: 'MATCH_OVER',
+          isCoop: true,
+          winnerName: 'โหมด Co-op ร่วมมือกัน',
+          winnerId: null,
+          p1Wins: 0,
+          p2Wins: 0,
+          targetWins: room.targetWins,
+          isMatchOver: true
+        });
+        if (room.hostWs && room.hostWs.readyState === WebSocket.OPEN) room.hostWs.send(coopGameOverMsg);
+        if (room.guestWs && room.guestWs.readyState === WebSocket.OPEN) room.guestWs.send(coopGameOverMsg);
+        broadcastRoomList();
+        break;
+      }
+
       const isHost = (client.id === room.hostId);
       // Opponent gets the win for this round
       if (isHost) {
@@ -438,6 +466,8 @@ function handleClientMessage(ws, data) {
             rounds: room.rounds,
             targetWins: room.targetWins,
             subMode: room.subMode,
+            splitRole: !!room.splitRole,
+            dualDrop: !!room.dualDrop,
             hostName: room.hostName,
             guestName: room.guestName,
             isHost: true
@@ -457,6 +487,8 @@ function handleClientMessage(ws, data) {
             rounds: room.rounds,
             targetWins: room.targetWins,
             subMode: room.subMode,
+            splitRole: !!room.splitRole,
+            dualDrop: !!room.dualDrop,
             hostName: room.hostName,
             guestName: room.guestName,
             isHost: false
@@ -486,6 +518,46 @@ function handleClientMessage(ws, data) {
             requesterName: client.name || (isHost ? room.hostName : room.guestName) || 'คู่ต่อสู้'
           }));
         }
+      }
+      break;
+    }
+
+    case 'COOP_INPUT': {
+      // Forward real-time co-op inputs (movement, rotation, drop, hold)
+      const room = rooms.get(client.roomId);
+      if (!room) return;
+      const isHost = (client.id === room.hostId);
+      const targetWs = isHost ? room.guestWs : room.hostWs;
+      if (targetWs && targetWs.readyState === WebSocket.OPEN) {
+        targetWs.send(JSON.stringify({
+          type: 'COOP_INPUT',
+          action: data.action,
+          val: data.val !== undefined ? data.val : null,
+          piece: data.piece || null,
+          state: data.state || null,
+          fromHost: isHost
+        }));
+      }
+      break;
+    }
+
+    case 'COOP_STATE_SYNC': {
+      // Sync board and falling pieces between co-op players
+      const room = rooms.get(client.roomId);
+      if (!room) return;
+      const isHost = (client.id === room.hostId);
+      const targetWs = isHost ? room.guestWs : room.hostWs;
+      if (targetWs && targetWs.readyState === WebSocket.OPEN) {
+        targetWs.send(JSON.stringify({
+          type: 'COOP_STATE_SYNC',
+          board: data.board,
+          activePiece: data.activePiece,
+          dualPiece: data.dualPiece,
+          score: data.score,
+          lines: data.lines,
+          level: data.level,
+          fromHost: isHost
+        }));
       }
       break;
     }
